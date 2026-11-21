@@ -11,8 +11,8 @@ const PORT = process.env.PORT || 3000;
 const rooms = new Map();
 const COLORS = ['#45e5ff','#ff5b82','#f4d35e','#8bff72','#bb86fc','#ff9e52','#62a7ff','#f5f5f5'];
 
-app.get('/', (req,res) => res.json({ game:'VORTEX LEGENDS', status:'online', service:'multiplayer-api', version:'1.4.0' }));
-app.get('/health', (req,res) => res.json({ status:'ok', rooms:rooms.size, version:'1.4.0' }));
+app.get('/', (req,res) => res.json({ game:'VORTEX LEGENDS', status:'online', service:'multiplayer-api', version:'1.5.0' }));
+app.get('/health', (req,res) => res.json({ status:'ok', rooms:rooms.size, version:'1.5.0' }));
 function makeId(){ return crypto.randomBytes(3).toString('hex').toUpperCase(); }
 function hashPassword(password,salt){ return crypto.pbkdf2Sync(password,salt,100000,32,'sha256').toString('hex'); }
 function playerPublic(p){ return { id:p.id,name:p.name,ready:p.ready,color:p.color,x:p.x,y:p.y,angle:p.angle,characterId:p.characterId||null }; }
