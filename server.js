@@ -1,140 +1,30 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const crypto = require("crypto");
-
-const app = express();
-app.use(express.json());
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const crypto = require('crypto');
+const app = express(); app.use(express.json());
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
-const PORT = process.env.PORT || 3000;
-const rooms = new Map();
-
-app.get("/", (req, res) => res.json({ game: "VORTEX LEGENDS", status: "online", service: "multiplayer-api", version: "1.1.0" }));
-app.get("/health", (req, res) => res.json({ status: "ok", rooms: rooms.size }));
-
-function makeId() { return crypto.randomBytes(3).toString("hex").toUpperCase(); }
-function hashPassword(password, salt) { return crypto.pbkdf2Sync(password, salt, 100000, 32, "sha256").toString("hex"); }
-function publicRoom(room) {
-  return { id: room.id, name: room.name, mode: room.mode, host: room.host,
-    players: Array.from(room.players.values()).map(p => ({ id: p.id, name: p.name, ready: p.ready })),
-    count: room.players.size, maxPlayers: room.maxPlayers, hasPassword: !!room.passwordHash, status: room.status };
-}
-function getRooms() { return Array.from(rooms.values()).map(publicRoom); }
-function sendRoom(room) { io.to("room:" + room.id).emit("room:update", publicRoom(room)); io.emit("rooms:list", getRooms()); }
-
-// Close a room completely, disconnecting its membership from every remaining socket.
-function closeRoom(room, reason = "host-left") {
-  if (!rooms.has(room.id)) return;
-  rooms.delete(room.id);
-  const roomChannel = "room:" + room.id;
-  io.to(roomChannel).emit("room:closed", { reason });
-  for (const playerId of room.players.keys()) {
-    const memberSocket = io.sockets.sockets.get(playerId);
-    if (memberSocket) {
-      memberSocket.leave(roomChannel);
-      memberSocket.roomId = null;
-    }
-  }
-  io.emit("rooms:list", getRooms());
-}
-function removePlayer(room, playerId) {
-  const player = room.players.get(playerId);
-  if (!player) return;
-  // Host leaving closes the room for everyone; no host transfer.
-  if (room.host === playerId) {
-    closeRoom(room, "host-left");
-    return;
-  }
-  room.players.delete(playerId);
-  const memberSocket = io.sockets.sockets.get(playerId);
-  if (memberSocket) { memberSocket.leave("room:" + room.id); memberSocket.roomId = null; }
-  if (room.players.size === 0) { closeRoom(room, "empty"); return; }
-  sendRoom(room);
-}
-
-io.on("connection", socket => {
-  socket.roomId = null;
-  socket.playerName = "Jogador";
-  socket.emit("server:welcome", { message: "Conectado ao VORTEX LEGENDS", id: socket.id });
-  socket.emit("rooms:list", getRooms());
-
-  socket.on("rooms:search", (query = "") => {
-    const term = String(query).toLowerCase().trim();
-    socket.emit("rooms:searchResult", getRooms().filter(r => r.name.toLowerCase().includes(term) || r.id.toLowerCase().includes(term)));
-  });
-
-  socket.on("room:create", (data = {}, callback = () => {}) => {
-    if (socket.roomId) return callback({ ok: false, error: "Você já está em uma sala." });
-    const name = String(data.name || "Sala").trim().slice(0, 30);
-    const playerName = String(data.playerName || "Jogador").trim().slice(0, 20);
-    const password = String(data.password || "");
-    const maxPlayers = Number(data.maxPlayers || 4);
-    const mode = String(data.mode || "normal").slice(0, 20);
-    if (![1, 2, 4, 6, 8].includes(maxPlayers)) return callback({ ok: false, error: "Limite de jogadores inválido." });
-    if (password.length > 32) return callback({ ok: false, error: "Senha muito longa." });
-    let id; do { id = makeId(); } while (rooms.has(id));
-    const salt = password ? crypto.randomBytes(16).toString("hex") : null;
-    const room = { id, name, mode, host: socket.id, maxPlayers, players: new Map(), passwordSalt: salt,
-      passwordHash: password ? hashPassword(password, salt) : null, status: "waiting", createdAt: Date.now() };
-    room.players.set(socket.id, { id: socket.id, name: playerName, ready: false });
-    rooms.set(id, room); socket.roomId = id; socket.playerName = playerName; socket.join("room:" + id);
-    sendRoom(room); callback({ ok: true, room: publicRoom(room) });
-  });
-
-  socket.on("room:join", (data = {}, callback = () => {}) => {
-    if (socket.roomId) return callback({ ok: false, error: "Você já está em uma sala." });
-    const room = rooms.get(String(data.id || "").toUpperCase());
-    if (!room) return callback({ ok: false, error: "Sala não encontrada." });
-    if (room.status !== "waiting") return callback({ ok: false, error: "A partida já começou." });
-    if (room.players.size >= room.maxPlayers) return callback({ ok: false, error: "Sala cheia." });
-    const password = String(data.password || "");
-    if (room.passwordHash && hashPassword(password, room.passwordSalt) !== room.passwordHash) return callback({ ok: false, error: "Senha incorreta." });
-    const playerName = String(data.playerName || "Jogador").trim().slice(0, 20);
-    room.players.set(socket.id, { id: socket.id, name: playerName, ready: false });
-    socket.roomId = room.id; socket.playerName = playerName; socket.join("room:" + room.id);
-    sendRoom(room); callback({ ok: true, room: publicRoom(room) });
-  });
-
-  socket.on("room:ready", (callback = () => {}) => {
-    const room = rooms.get(socket.roomId);
-    if (!room) return callback({ ok: false, error: "Você não está em uma sala." });
-    const player = room.players.get(socket.id);
-    if (!player) return callback({ ok: false, error: "Jogador não encontrado." });
-    player.ready = !player.ready; sendRoom(room); callback({ ok: true, ready: player.ready });
-  });
-
-  socket.on("room:start", (callback = () => {}) => {
-    const room = rooms.get(socket.roomId);
-    if (!room) return callback({ ok: false, error: "Sala não encontrada." });
-    if (room.host !== socket.id) return callback({ ok: false, error: "Somente o host pode iniciar." });
-    // Solo start is allowed; with one player, readiness of that player is still required.
-    if (!Array.from(room.players.values()).every(p => p.ready)) return callback({ ok: false, error: "Todos precisam estar prontos." });
-    room.status = "playing"; sendRoom(room);
-    io.to("room:" + room.id).emit("game:start", { roomId: room.id, players: publicRoom(room).players, mode: room.mode });
-    callback({ ok: true });
-  });
-
-  socket.on("room:kick", (playerId, callback = () => {}) => {
-    const room = rooms.get(socket.roomId);
-    if (!room) return callback({ ok: false, error: "Sala não encontrada." });
-    if (room.host !== socket.id) return callback({ ok: false, error: "Somente o host pode expulsar." });
-    if (playerId === room.host) return callback({ ok: false, error: "Não pode expulsar o host." });
-    if (!room.players.has(playerId)) return callback({ ok: false, error: "Jogador não encontrado." });
-    const target = io.sockets.sockets.get(playerId);
-    if (target) target.emit("room:kicked");
-    removePlayer(room, playerId); callback({ ok: true });
-  });
-
-  socket.on("room:leave", (callback = () => {}) => {
-    const room = rooms.get(socket.roomId);
-    if (room) removePlayer(room, socket.id);
-    callback({ ok: true });
-  });
-
-  socket.on("disconnect", () => {
-    const room = rooms.get(socket.roomId);
-    if (room) removePlayer(room, socket.id);
-  });
+const io = new Server(server,{cors:{origin:'*',methods:['GET','POST']}});
+const PORT=process.env.PORT||3000, rooms=new Map();
+const COLORS=['#45e5ff','#ff5b82','#f4d35e','#8bff72','#bb86fc','#ff9e52','#62a7ff','#f5f5f5'];
+app.get('/',(req,res)=>res.json({game:'VORTEX LEGENDS',status:'online',service:'multiplayer-api',version:'1.2.0'}));
+app.get('/health',(req,res)=>res.json({status:'ok',rooms:rooms.size}));
+function makeId(){return crypto.randomBytes(3).toString('hex').toUpperCase()}
+function hashPassword(password,salt){return crypto.pbkdf2Sync(password,salt,100000,32,'sha256').toString('hex')}
+function publicRoom(room){return{id:room.id,name:room.name,mode:room.mode,host:room.host,players:Array.from(room.players.values()).map(p=>({id:p.id,name:p.name,ready:p.ready,color:p.color})),count:room.players.size,maxPlayers:room.maxPlayers,hasPassword:!!room.passwordHash,status:room.status}}
+function getRooms(){return Array.from(rooms.values()).map(publicRoom)}
+function sendRoom(room){io.to('room:'+room.id).emit('room:update',publicRoom(room));io.emit('rooms:list',getRooms())}
+function closeRoom(room,reason='host-left'){if(!rooms.has(room.id))return;rooms.delete(room.id);const ch='room:'+room.id;io.to(ch).emit('room:closed',{reason});for(const id of room.players.keys()){const s=io.sockets.sockets.get(id);if(s){s.leave(ch);s.roomId=null;s.onlineRoomId=null}}io.emit('rooms:list',getRooms())}
+function removePlayer(room,id){const p=room.players.get(id);if(!p)return;if(room.host===id){closeRoom(room,'host-left');return}room.players.delete(id);const s=io.sockets.sockets.get(id);if(s){s.leave('room:'+room.id);s.roomId=null;s.onlineRoomId=null}if(!room.players.size){closeRoom(room,'empty');return}sendRoom(room)}
+io.on('connection',socket=>{
+ socket.roomId=null;socket.onlineRoomId=null;socket.playerName='Jogador';socket.emit('server:welcome',{message:'Conectado ao VORTEX LEGENDS',id:socket.id});socket.emit('rooms:list',getRooms());
+ socket.on('rooms:search',(q='')=>{const term=String(q).toLowerCase().trim();socket.emit('rooms:searchResult',getRooms().filter(r=>r.name.toLowerCase().includes(term)||r.id.toLowerCase().includes(term)))});
+ socket.on('room:create',(d={},cb=()=>{})=>{if(socket.roomId)return cb({ok:false,error:'Você já está em uma sala.'});const name=String(d.name||'Sala').trim().slice(0,30),playerName=String(d.playerName||'Jogador').trim().slice(0,20),password=String(d.password||''),maxPlayers=Number(d.maxPlayers||4),mode=String(d.mode||'Normal').slice(0,20);if(![1,2,4,6,8].includes(maxPlayers))return cb({ok:false,error:'Limite de jogadores inválido.'});if(password.length>32)return cb({ok:false,error:'Senha muito longa.'});let id;do{id=makeId()}while(rooms.has(id));const salt=password?crypto.randomBytes(16).toString('hex'):null,room={id,name,mode,host:socket.id,maxPlayers,players:new Map(),passwordSalt:salt,passwordHash:password?hashPassword(password,salt):null,status:'waiting',createdAt:Date.now()};room.players.set(socket.id,{id:socket.id,name:playerName,ready:false,color:COLORS[0],x:0,y:0,angle:0});rooms.set(id,room);socket.roomId=id;socket.playerName=playerName;socket.join('room:'+id);sendRoom(room);cb({ok:true,room:publicRoom(room)})});
+ socket.on('room:join',(d={},cb=()=>{})=>{if(socket.roomId)return cb({ok:false,error:'Você já está em uma sala.'});const room=rooms.get(String(d.id||'').toUpperCase());if(!room)return cb({ok:false,error:'Sala não encontrada.'});if(room.status!=='waiting')return cb({ok:false,error:'A partida já começou.'});if(room.players.size>=room.maxPlayers)return cb({ok:false,error:'Sala cheia.'});const password=String(d.password||'');if(room.passwordHash&&hashPassword(password,room.passwordSalt)!==room.passwordHash)return cb({ok:false,error:'Senha incorreta.'});const playerName=String(d.playerName||'Jogador').trim().slice(0,20),color=COLORS[room.players.size%COLORS.length];room.players.set(socket.id,{id:socket.id,name:playerName,ready:false,color,x:0,y:0,angle:0});socket.roomId=room.id;socket.playerName=playerName;socket.join('room:'+room.id);sendRoom(room);cb({ok:true,room:publicRoom(room)})});
+ socket.on('room:ready',cb=>{const room=rooms.get(socket.roomId);if(!room)return cb({ok:false,error:'Você não está em uma sala.'});const p=room.players.get(socket.id);if(!p)return cb({ok:false,error:'Jogador não encontrado.'});p.ready=!p.ready;sendRoom(room);cb({ok:true,ready:p.ready})});
+ socket.on('room:start',cb=>{const room=rooms.get(socket.roomId);if(!room)return cb({ok:false,error:'Sala não encontrada.'});if(room.host!==socket.id)return cb({ok:false,error:'Somente o host pode iniciar.'});if(!Array.from(room.players.values()).every(p=>p.ready))return cb({ok:false,error:'Todos precisam estar prontos.'});room.status='playing';sendRoom(room);io.to('room:'+room.id).emit('game:start',{roomId:room.id,players:publicRoom(room).players,mode:room.mode});cb({ok:true})});
+ socket.on('player:position',d=>{const room=rooms.get(socket.roomId);if(!room||room.status!=='playing'||String(d.roomId)!==room.id)return;const p=room.players.get(socket.id);if(!p)return;const x=Number(d.x),y=Number(d.y),angle=Number(d.angle);if(!Number.isFinite(x)||!Number.isFinite(y)||!Number.isFinite(angle)||Math.abs(x)>1e7||Math.abs(y)>1e7)return;p.x=x;p.y=y;p.angle=angle;socket.to('room:'+room.id).emit('players:position',{id:p.id,name:p.name,color:p.color,x,y,angle})});
+ socket.on('room:kick',(pid,cb=()=>{})=>{const room=rooms.get(socket.roomId);if(!room)return cb({ok:false,error:'Sala não encontrada.'});if(room.host!==socket.id)return cb({ok:false,error:'Somente o host pode expulsar.'});if(pid===room.host)return cb({ok:false,error:'Não pode expulsar o host.'});if(!room.players.has(pid))return cb({ok:false,error:'Jogador não encontrado.'});const t=io.sockets.sockets.get(pid);if(t)t.emit('room:kicked');removePlayer(room,pid);cb({ok:true})});
+ socket.on('room:leave',cb=>{const room=rooms.get(socket.roomId);if(room)removePlayer(room,socket.id);cb({ok:true})});socket.on('disconnect',()=>{const room=rooms.get(socket.roomId);if(room)removePlayer(room,socket.id)});
 });
-server.listen(PORT, "0.0.0.0", () => console.log("VORTEX API online na porta " + PORT));
+server.listen(PORT,'0.0.0.0',()=>console.log('VORTEX multiplayer API online port '+PORT));
