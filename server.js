@@ -21,75 +21,6 @@ const COLORS = ['#45e5ff','#ff5b82','#f4d35e','#8bff72','#bb86fc','#ff9e52','#62
 
 app.get('/', (req,res)=>res.json({game:'VORTEX LEGENDS',status:'online',service:'multiplayer-api',version:'1.11.1'}));
 app.get('/health',(req,res)=>res.json({status:'ok',rooms:rooms.size,version:'1.11.1'}));
-
-/* ===== VORTEX LEGENDS UPDATE SYSTEM ===== */
-let publishedUpdate = {
-  version: process.env.LATEST_VERSION || "1.0.0",
-  minVersion: process.env.MIN_VERSION || "1.0.0",
-  apkUrl: process.env.APK_URL || "",
-  changelog: process.env.CHANGELOG || "Versão inicial",
-  publishedAt: process.env.PUBLISHED_AT || null,
-  mandatory: true
-};
-
-function parseUpdateVersion(v) {
-  const m = String(v || "").trim().replace(/^v/i, "").match(/^(\d+)\.(\d+)\.(\d+)$/);
-  return m ? m.slice(1).map(n => Number(n)) : null;
-}
-function compareUpdateVersions(a, b) {
-  const A = parseUpdateVersion(a) || [0, 0, 0];
-  const B = parseUpdateVersion(b) || [0, 0, 0];
-  for (let i = 0; i < 3; i++) {
-    if (A[i] !== B[i]) return A[i] > B[i] ? 1 : -1;
-  }
-  return 0;
-}
-app.get('/api/update/latest', (req, res) => {
-  res.json({ ok: true, update: publishedUpdate });
-});
-app.get('/api/update/check', (req, res) => {
-  const installed = String(req.query.version || '0.0.0');
-  const update = publishedUpdate;
-  const available = compareUpdateVersions(installed, update.version) < 0;
-  const required = !!update.mandatory && compareUpdateVersions(installed, update.minVersion) < 0;
-  res.json({
-    ok: true,
-    installedVersion: installed,
-    latestVersion: update.version,
-    minVersion: update.minVersion,
-    updateAvailable: available,
-    required,
-    mandatory: !!update.mandatory,
-    apkUrl: available ? update.apkUrl : null,
-    changelog: available ? update.changelog : null,
-    publishedAt: update.publishedAt
-  });
-});
-app.post('/api/admin/update/publish', (req, res) => {
-  const adminKey = process.env.OWNER_UPDATE_KEY;
-  if (!adminKey) return res.status(503).json({ ok: false, error: 'Configure OWNER_UPDATE_KEY nas variáveis do Render.' });
-  if (req.get('x-admin-key') !== adminKey) return res.status(403).json({ ok: false, error: 'Acesso de administrador negado.' });
-  const body = req.body || {};
-  const version = typeof body.version === 'string' ? body.version.trim() : '';
-  const apkUrl = typeof body.apkUrl === 'string' ? body.apkUrl.trim() : '';
-  if (!parseUpdateVersion(version)) return res.status(400).json({ ok: false, error: 'Versão inválida. Use formato 22.0.1.' });
-  if (!apkUrl) return res.status(400).json({ ok: false, error: 'Link do APK obrigatório.' });
-  let url;
-  try { url = new URL(apkUrl); } catch (_) { return res.status(400).json({ ok: false, error: 'URL do APK inválida.' }); }
-  if (url.protocol !== 'https:') return res.status(400).json({ ok: false, error: 'O link precisa ser HTTPS.' });
-  if (compareUpdateVersions(version, publishedUpdate.version) <= 0) return res.status(400).json({ ok: false, error: 'A versão nova precisa ser maior que a atual publicada.' });
-  publishedUpdate = {
-    version,
-    minVersion: version,
-    apkUrl: url.href,
-    changelog: String(body.changelog || 'Nova atualização').slice(0, 2000),
-    publishedAt: new Date().toISOString(),
-    mandatory: true
-  };
-  io.emit('game:update:published', { version, mandatory: true });
-  return res.json({ ok: true, message: 'Atualização publicada!', update: publishedUpdate });
-});
-/* ===== END VORTEX LEGENDS UPDATE SYSTEM ===== */
 function makeId(){return crypto.randomBytes(3).toString('hex').toUpperCase();}
 function hashPassword(password,salt){return crypto.pbkdf2Sync(password,salt,100000,32,'sha256').toString('hex');}
 function playerPublic(p){return {id:p.id,name:p.name,ready:p.ready,color:p.color,x:p.x,y:p.y,angle:p.angle,characterId:p.characterId||null,mapId:p.mapId??0,downed:!!p.downed,reviveProgress:p.reviveStartedAt?Math.max(0,(Date.now()-p.reviveStartedAt)/1000):0};}
@@ -153,7 +84,13 @@ room.orbSnapshot=orbs;room.mobSnapshot={roomId:room.id,seq:Number(d.seq)||now,mo
  socket.on('player:mobDamage',d=>{const room=rooms.get(socket.roomId);if(!room||room.status!=='playing'||String(d?.roomId)!==room.id||room.host!==socket.id)return;const playerId=String(d.playerId||''),damage=Number(d.damage),victim=room.players.get(playerId);if(!victim||playerId===socket.id||victim.downed||!Number.isFinite(damage)||damage<=0||damage>1e7)return;const now=Date.now();if(now-room.lastPlayerDamageAt<30)return;room.lastPlayerDamageAt=now;const target=io.sockets.sockets.get(playerId);if(target)target.emit('player:mobDamage',{roomId:room.id,playerId,damage:Math.min(1e7,damage)});});
  socket.on('room:kick',(pid,cb=()=>{})=>{const room=rooms.get(socket.roomId);if(!room)return cb({ok:false,error:'Sala não encontrada.'});if(room.host!==socket.id)return cb({ok:false,error:'Somente o host pode expulsar.'});if(pid===room.host)return cb({ok:false,error:'Não pode expulsar o host.'});if(!room.players.has(pid))return cb({ok:false,error:'Jogador não encontrado.'});const target=io.sockets.sockets.get(pid);if(target)target.emit('room:kicked');removePlayer(room,pid);cb({ok:true});});
  socket.on('room:leave',(cb=()=>{})=>{const room=rooms.get(socket.roomId);if(room)removePlayer(room,socket.id);cb({ok:true});});
- socket.on('disconnect',()=>{const room=rooms.get(socket.roomId);if(room)removePlayer(room,socket.id);});
+ // ===== VOICE CHAT SIGNALING (WebRTC, room-scoped) =====
+ socket.on('voice:join',d=>{const room=rooms.get(socket.roomId);if(!room||room.status!=='playing'||String(d?.roomId)!==room.id)return;room.voiceUsers=room.voiceUsers||new Set();const peers=[...room.voiceUsers].filter(id=>id!==socket.id);room.voiceUsers.add(socket.id);socket.emit('voice:peers',{roomId:room.id,peers});socket.to('room:'+room.id).emit('voice:peer-joined',{roomId:room.id,id:socket.id});});
+ socket.on('voice:leave',d=>{const room=rooms.get(socket.roomId);if(!room||String(d?.roomId)!==room.id||!room.voiceUsers?.has(socket.id))return;room.voiceUsers.delete(socket.id);socket.to('room:'+room.id).emit('voice:peer-left',{roomId:room.id,id:socket.id});});
+ socket.on('voice:signal',d=>{const room=rooms.get(socket.roomId);if(!room||String(d?.roomId)!==room.id||!room.voiceUsers?.has(socket.id))return;const targetId=String(d?.to||''),target=io.sockets.sockets.get(targetId),signal=d?.signal;if(!target||target.roomId!==room.id||!room.voiceUsers.has(targetId)||!signal||typeof signal!=='object')return;const payload=JSON.stringify(signal);if(payload.length>16000)return;target.emit('voice:signal',{roomId:room.id,from:socket.id,signal});});
+ socket.on('voice:mute',d=>{const room=rooms.get(socket.roomId);if(!room||String(d?.roomId)!==room.id||!room.voiceUsers?.has(socket.id))return;socket.to('room:'+room.id).emit('voice:muted',{roomId:room.id,id:socket.id,muted:!!d.muted});});
+
+ socket.on('disconnect',()=>{const room=rooms.get(socket.roomId);if(room){if(room.voiceUsers?.delete(socket.id))socket.to('room:'+room.id).emit('voice:peer-left',{roomId:room.id,id:socket.id});removePlayer(room,socket.id);}});
 });
 setInterval(()=>{
   const now=Date.now();
