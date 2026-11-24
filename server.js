@@ -1,5 +1,6 @@
 
 /* ===== VORTEX LEGENDS UPDATE SYSTEM ===== */
+
 let publishedUpdate = {
   version: process.env.LATEST_VERSION || "1.0.0",
   minVersion: process.env.MIN_VERSION || "1.0.0",
@@ -19,13 +20,18 @@ function versionParts(v) {
 function compareVersions(a, b) {
   const A = versionParts(a);
   const B = versionParts(b);
+
   for (let i = 0; i < 3; i++) {
-    if ((A[i] || 0) !== (B[i] || 0))
-      return (A[i] || 0) > (B[i] || 0) ? 1 : -1;
+    const av = A[i] || 0;
+    const bv = B[i] || 0;
+
+    if (av !== bv) return av > bv ? 1 : -1;
   }
+
   return 0;
 }
 
+// Informações da última atualização
 app.get("/api/update/latest", (req, res) => {
   res.json({
     ok: true,
@@ -33,11 +39,13 @@ app.get("/api/update/latest", (req, res) => {
   });
 });
 
+// Verifica a versão instalada no jogador
 app.get("/api/update/check", (req, res) => {
   const installed = String(req.query.version || "0.0.0");
   const update = publishedUpdate;
 
   const required =
+    update.mandatory &&
     compareVersions(installed, update.minVersion) < 0;
 
   const available =
@@ -50,12 +58,14 @@ app.get("/api/update/check", (req, res) => {
     minVersion: update.minVersion,
     updateAvailable: available,
     required,
+    mandatory: update.mandatory,
     apkUrl: available ? update.apkUrl : null,
     changelog: available ? update.changelog : null,
     publishedAt: update.publishedAt
   });
 });
 
+// Publica uma atualização pelo painel do proprietário
 app.post("/api/admin/update/publish", (req, res) => {
   const key = process.env.OWNER_UPDATE_KEY;
 
@@ -75,31 +85,35 @@ app.post("/api/admin/update/publish", (req, res) => {
 
   const { version, apkUrl, changelog } = req.body || {};
 
-  if (!version || !/^\\d+\\.\\d+\\.\\d+$/.test(version)) {
+  if (
+    typeof version !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(version)
+  ) {
     return res.status(400).json({
       ok: false,
-      error: "Versão inválida. Exemplo: 2.0.1"
+      error: "Versão inválida. Exemplo: 22.0.1"
     });
   }
 
-  if (!apkUrl) {
+  if (typeof apkUrl !== "string" || !apkUrl.trim()) {
     return res.status(400).json({
       ok: false,
       error: "Link do APK obrigatório."
     });
   }
 
-  let parsed;
+  let parsedUrl;
+
   try {
-    parsed = new URL(apkUrl);
-  } catch {
+    parsedUrl = new URL(apkUrl.trim());
+  } catch (e) {
     return res.status(400).json({
       ok: false,
       error: "Link do APK inválido."
     });
   }
 
-  if (parsed.protocol !== "https:") {
+  if (parsedUrl.protocol !== "https:") {
     return res.status(400).json({
       ok: false,
       error: "O link do APK precisa usar HTTPS."
@@ -114,23 +128,24 @@ app.post("/api/admin/update/publish", (req, res) => {
   }
 
   publishedUpdate = {
-    version,
+    version: version,
     minVersion: version,
-    apkUrl: parsed.href,
+    apkUrl: parsedUrl.href,
     changelog: String(changelog || "Nova atualização").slice(0, 2000),
     publishedAt: new Date().toISOString(),
     mandatory: true
   };
 
   io.emit("game:update:published", {
-    version,
+    version: version,
     mandatory: true
   });
 
-  res.json({
+  return res.json({
     ok: true,
     message: "Atualização publicada!",
     update: publishedUpdate
   });
 });
-/* ===== END UPDATE SYSTEM ===== */
+
+/* ===== END VORTEX LEGENDS UPDATE SYSTEM ===== */
