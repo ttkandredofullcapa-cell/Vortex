@@ -19,8 +19,8 @@ const REVIVE_SECONDS = 10;
 const ROOM_CLOCK_MS = 1000;
 const COLORS = ['#45e5ff','#ff5b82','#f4d35e','#8bff72','#bb86fc','#ff9e52','#62a7ff','#f5f5f5'];
 
-app.get('/', (req,res)=>res.json({game:'VORTEX LEGENDS',status:'online',service:'multiplayer-api',version:'1.10.0'}));
-app.get('/health',(req,res)=>res.json({status:'ok',rooms:rooms.size,version:'1.10.0'}));
+app.get('/', (req,res)=>res.json({game:'VORTEX LEGENDS',status:'online',service:'multiplayer-api',version:'1.11.1'}));
+app.get('/health',(req,res)=>res.json({status:'ok',rooms:rooms.size,version:'1.11.1'}));
 function makeId(){return crypto.randomBytes(3).toString('hex').toUpperCase();}
 function hashPassword(password,salt){return crypto.pbkdf2Sync(password,salt,100000,32,'sha256').toString('hex');}
 function playerPublic(p){return {id:p.id,name:p.name,ready:p.ready,color:p.color,x:p.x,y:p.y,angle:p.angle,characterId:p.characterId||null,mapId:p.mapId??0,downed:!!p.downed,reviveProgress:p.reviveStartedAt?Math.max(0,(Date.now()-p.reviveStartedAt)/1000):0};}
@@ -96,4 +96,4 @@ setInterval(()=>{
 },ROOM_CLOCK_MS);
 
 setInterval(()=>{for(const room of rooms.values()){if(room.status!=='playing')continue;const alive=Array.from(room.players.values()).filter(p=>!p.downed);for(const down of room.players.values()){if(!down.downed)continue;const helper=alive.find(p=>p.id!==down.id&&Math.hypot(p.x-down.x,p.y-down.y)<=REVIVE_RANGE);if(helper){if(!down.reviveStartedAt)down.reviveStartedAt=Date.now();const elapsed=(Date.now()-down.reviveStartedAt)/1000;io.to('room:'+room.id).emit('player:revive:progress',{id:down.id,seconds:elapsed,helperId:helper.id});if(elapsed>=REVIVE_SECONDS){down.downed=false;down.reviveStartedAt=0;io.to('room:'+room.id).emit('player:revived',{id:down.id,by:helper.id});sendRoom(room);}}else if(down.reviveStartedAt){down.reviveStartedAt=0;io.to('room:'+room.id).emit('player:revive:progress',{id:down.id,seconds:0});}}}},500);
-server.listen(PORT,'0.0.0.0',()=>console.log('VORTEX multiplayer API v1.10.0 online port '+PORT));
+server.listen(PORT,'0.0.0.0',()=>console.log('VORTEX multiplayer API v1.11.1 online port '+PORT));
