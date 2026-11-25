@@ -14,8 +14,9 @@ process.on('unhandledRejection',e=>console.error('unhandledRejection',e));
 const PORT = process.env.PORT || 3000;
 const rooms = new Map();
 const MAP_COUNT = 5;
-const REVIVE_RANGE = 100; // approximate game-world units for the requested ~2m proximity
-const REVIVE_SECONDS = 10;
+const MAX_PLAYERS_PER_ROOM = 2800; // sem limite de salas; até 2800 jogadores por sala
+const REVIVE_RANGE = 250; // ~5 metros (50 unidades do jogo = 1 metro)
+const REVIVE_SECONDS = 5;
 const ROOM_CLOCK_MS = 1000;
 const COLORS = ['#45e5ff','#ff5b82','#f4d35e','#8bff72','#bb86fc','#ff9e52','#62a7ff','#f5f5f5'];
 
@@ -47,7 +48,7 @@ io.on('connection',socket=>{
  socket.on('room:create',(d={},cb=()=>{})=>{
   if(socket.roomId)return cb({ok:false,error:'Você já está em uma sala.'});
   const name=String(d.name||'Sala').trim().slice(0,30),playerName=String(d.playerName||'Jogador').trim().slice(0,20),password=String(d.password||''),maxPlayers=Number(d.maxPlayers||4),mode=String(d.mode||'Normal').slice(0,20),mapId=0;
-  if(![1,2,4,6,8].includes(maxPlayers))return cb({ok:false,error:'Limite de jogadores inválido.'});
+  if(!Number.isInteger(maxPlayers)||maxPlayers<1||maxPlayers>MAX_PLAYERS_PER_ROOM)return cb({ok:false,error:'Limite de jogadores inválido.'});
   if(password.length>32)return cb({ok:false,error:'Senha muito longa.'});
   if(!Number.isInteger(mapId)||mapId<0||mapId>=MAP_COUNT)return cb({ok:false,error:'Mapa inválido.'});
   let id;do{id=makeId();}while(rooms.has(id));const salt=password?crypto.randomBytes(16).toString('hex'):null;
