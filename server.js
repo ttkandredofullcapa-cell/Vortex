@@ -6,15 +6,16 @@ const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] }, maxHttpBufferSize: 1e6, pingInterval: 20000, pingTimeout: 40000 });
+const ALLOWED=(process.env.ALLOWED_ORIGINS||'').split(',').map(x=>x.trim()).filter(Boolean); // ex.: https://meujogo.com (vazio = qualquer origem)
+const io = new Server(server, { cors: { origin: ALLOWED.length?ALLOWED:'*', methods: ['GET', 'POST'] }, maxHttpBufferSize: 1e6, pingInterval: 20000, pingTimeout: 40000 });
 app.disable('x-powered-by');
+app.use((req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');next()});
 // Um erro inesperado num evento não pode derrubar o servidor (e todas as salas) no Render.
 process.on('uncaughtException',e=>console.error('uncaughtException',e));
 process.on('unhandledRejection',e=>console.error('unhandledRejection',e));
 const PORT = process.env.PORT || 3000;
 const rooms = new Map();
 const MAP_COUNT = 5;
-const MAX_PLAYERS_PER_ROOM = 2800; // sem limite de salas; até 2800 jogadores por sala
 const REVIVE_RANGE = 250; // ~5 metros (50 unidades do jogo = 1 metro)
 const REVIVE_SECONDS = 5;
 const ROOM_CLOCK_MS = 1000;
@@ -40,6 +41,33 @@ function removePlayer(room,id){const p=room.players.get(id);if(!p)return;room.pl
  io.to('room:'+room.id).emit('player:left',{id});sendRoom(room);
 }
 function validPosition(d){const x=Number(d.x),y=Number(d.y),angle=Number(d.angle||0);if(!Number.isFinite(x)||!Number.isFinite(y)||!Number.isFinite(angle)||Math.abs(x)>1e7||Math.abs(y)>1e7||Math.abs(angle)>1e6)return null;return{x,y,angle};}
+
+/* ===== SEGURANÇA ===== */
+// 1) Anti-flood: limite de eventos por conexão (balde de fichas) e por IP (conexões simultâneas)
+const ipConns=new Map();
+io.use((socket,next)=>{const ip=String(socket.handshake.headers['x-forwarded-for']||socket.handshake.address||'').split(',')[0].trim();socket.ip=ip;const n=ipConns.get(ip)||0;if(n>=40)return next(new Error('Muitas conexões deste IP.'));ipConns.set(ip,n+1);socket.on('disconnect',()=>{const c=(ipConns.get(ip)||1)-1;if(c<=0)ipConns.delete(ip);else ipConns.set(ip,c)});next()});
+io.on('connection',socket=>{
+  socket.bucket={t:300,at:Date.now(),strikes:0};
+  socket.use((packet,next)=>{const b=socket.bucket,now=Date.now();b.t=Math.min(300,b.t+(now-b.at)*0.2);b.at=now; // 200 eventos/s, rajada 300
+    if(b.t<1){if(++b.strikes>200){try{socket.disconnect(true)}catch(e){}}return;}
+    b.t-=1;
+    try{const s=JSON.stringify(packet[1]);if(s&&s.length>60000)return;}catch(e){return}
+    next();});
+  // 2) Login do dono validado NO SERVIDOR (a senha não fica mais no HTML). Defina OWNER_USER e OWNER_PASS no Render.
+  socket.on('owner:login',(d={},cb=()=>{})=>{
+    const OU=process.env.OWNER_USER,OP=process.env.OWNER_PASS;
+    if(!OU||!OP)return cb({ok:false,error:'Painel do dono desativado: defina OWNER_USER e OWNER_PASS no servidor.'});
+    const now=Date.now();socket.ownerTries=(socket.ownerTries||[]).filter(x=>now-x<600000);
+    const g=ownerFails.get(socket.ip)||[];const gg=g.filter(x=>now-x<900000);
+    if(socket.ownerTries.length>=5||gg.length>=8)return cb({ok:false,error:'Muitas tentativas. Aguarde alguns minutos.'});
+    const h=x=>crypto.createHash('sha256').update(String(x||'')).digest();
+    const ok=crypto.timingSafeEqual(h(d.u),h(OU))&crypto.timingSafeEqual(h(d.p),h(OP));
+    if(!ok){socket.ownerTries.push(now);gg.push(now);ownerFails.set(socket.ip,gg);return cb({ok:false,error:'Acesso negado.'})}
+    cb({ok:true});
+  });
+});
+const ownerFails=new Map();
+
 io.on('connection',socket=>{
  const _on=socket.on.bind(socket);
  socket.on=(ev,fn)=>_on(ev,(...a)=>{try{return fn(...a)}catch(e){console.error('socket handler',ev,e);const cb=a[a.length-1];if(typeof cb==='function'){try{cb({ok:false,error:'Erro interno do servidor.'})}catch(_){}}}});
@@ -47,8 +75,8 @@ io.on('connection',socket=>{
  socket.on('rooms:search',(q='')=>{const term=String(q).toLowerCase().trim();socket.emit('rooms:searchResult',getRooms().filter(r=>r.name.toLowerCase().includes(term)||r.id.toLowerCase().includes(term)));});
  socket.on('room:create',(d={},cb=()=>{})=>{
   if(socket.roomId)return cb({ok:false,error:'Você já está em uma sala.'});
-  const name=String(d.name||'Sala').trim().slice(0,30),playerName=String(d.playerName||'Jogador').trim().slice(0,20),password=String(d.password||''),maxPlayers=Number(d.maxPlayers||4),mode=String(d.mode||'Normal').slice(0,20),mapId=0;
-  if(!Number.isInteger(maxPlayers)||maxPlayers<1||maxPlayers>MAX_PLAYERS_PER_ROOM)return cb({ok:false,error:'Limite de jogadores inválido.'});
+  const name=String(d.name||'Sala').trim().slice(0,30),playerName=String(d.playerName||'Jogador').trim().slice(0,20),password=String(d.password||''),maxPlayers=Number(d.maxPlayers??4),mode=String(d.mode||'Normal').slice(0,20),mapId=0;
+  if(!Number.isInteger(maxPlayers)||maxPlayers<0)return cb({ok:false,error:'Limite de jogadores inválido.'}); // 0 = sem limite
   if(password.length>32)return cb({ok:false,error:'Senha muito longa.'});
   if(!Number.isInteger(mapId)||mapId<0||mapId>=MAP_COUNT)return cb({ok:false,error:'Mapa inválido.'});
   let id;do{id=makeId();}while(rooms.has(id));const salt=password?crypto.randomBytes(16).toString('hex'):null;
@@ -60,7 +88,7 @@ io.on('connection',socket=>{
  socket.on('room:join',(d={},cb=()=>{})=>{
   if(socket.roomId)return cb({ok:false,error:'Você já está em uma sala.'});
   const room=rooms.get(String(d.id||'').toUpperCase());if(!room)return cb({ok:false,error:'Sala não encontrada.'});
-  if(room.players.size>=room.maxPlayers)return cb({ok:false,error:'Sala cheia.'});
+  if(room.maxPlayers>0&&room.players.size>=room.maxPlayers)return cb({ok:false,error:'Sala cheia.'});
   const password=String(d.password||'');if(room.passwordHash&&hashPassword(password,room.passwordSalt)!==room.passwordHash)return cb({ok:false,error:'Senha incorreta.'});if(room.status==='playing'&&(!d.charUnlocked||!d.mapUnlocked||Number(d.mapId)!==room.mapId))return cb({ok:false,error:'Desbloqueie o personagem e o mapa da sala antes de entrar em partida iniciada.'});
   const playerName=String(d.playerName||'Jogador').trim().slice(0,20),color=COLORS[room.players.size%COLORS.length];
   room.players.set(socket.id,{id:socket.id,name:playerName,ready:room.status==='playing',color,x:0,y:0,angle:0,characterId:d.characterId||null,mapId:room.status==='playing'?room.mapId:(Number.isInteger(d.mapId)?d.mapId:room.mapId),charUnlocked:!!d.charUnlocked,mapUnlocked:!!d.mapUnlocked,downed:false,reviveStartedAt:0});
@@ -81,7 +109,7 @@ io.on('connection',socket=>{
   const mobs=d.mobs.slice(0,40).map(m=>{const key=String(m.key||'').slice(0,40),id=String(m.id||'').slice(0,60),x=Number(m.x),y=Number(m.y),hp=Number(m.hp),mhp=Number(m.mhp);if(!key||!id||!Number.isFinite(x)||!Number.isFinite(y)||!Number.isFinite(hp)||!Number.isFinite(mhp))return null;const o={id,key,x,y,hp:Math.max(0,Math.min(hp,1e12)),mhp:Math.max(1,Math.min(mhp,1e12)),dead:!!m.dead};const props=['st','ct','ot','ph','sl','boss','el','bn','dmgM','spdM','final','at2','chT','chD','cx','cy','chS','chL','cdh','enr','sn','hf','fx','__vxAggroId','__vxAggroUntil','__vxTargetId'];for(const k of props){const v=m[k];if(typeof v==='number'&&Number.isFinite(v))o[k]=Math.max(-1e7,Math.min(1e7,v));else if(typeof v==='boolean'||typeof v==='string')o[k]=v;}return o;}).filter(Boolean).filter(m=>m.boss||m.final);const orbs=[];//XP orbs são locais de cada jogador; o servidor não as repassa
 room.orbSnapshot=orbs;room.mobSnapshot={roomId:room.id,seq:Number(d.seq)||now,mobs};socket.to('room:'+room.id).emit('mob:snapshot',{...room.mobSnapshot,orbs});
  });
- socket.on('mob:hit',d=>{const room=rooms.get(socket.roomId);if(!room||room.status!=='playing'||String(d?.roomId)!==room.id||socket.id===room.host)return;const now=Date.now();if(now-socket.lastMobHitAt<30)return;socket.lastMobHitAt=now;const mobId=String(d.mobId||'').slice(0,60),damage=Number(d.damage);if(!mobId||!Number.isFinite(damage)||damage<=0||damage>1e8)return;const host=io.sockets.sockets.get(room.host);if(host)host.emit('mob:hit:apply',{roomId:room.id,mobId,damage:Math.min(1e8,damage)});});
+ socket.on('mob:hit',d=>{const room=rooms.get(socket.roomId);if(!room||room.status!=='playing'||String(d?.roomId)!==room.id||socket.id===room.host)return;const now=Date.now();if(now-socket.lastMobHitAt<30)return;socket.lastMobHitAt=now;const mobId=String(d.mobId||'').slice(0,60),damage=Number(d.damage);if(!mobId||!Number.isFinite(damage)||damage<=0||damage>5e5)return;{const n2=Date.now();socket.dmgW=socket.dmgW&&n2-socket.dmgW.t<1000?socket.dmgW:{t:n2,s:0};socket.dmgW.s+=damage;if(socket.dmgW.s>3e6)return;}const host=io.sockets.sockets.get(room.host);if(host)host.emit('mob:hit:apply',{roomId:room.id,mobId,damage:Math.min(5e5,damage)});});
  socket.on('player:mobDamage',d=>{const room=rooms.get(socket.roomId);if(!room||room.status!=='playing'||String(d?.roomId)!==room.id||room.host!==socket.id)return;const playerId=String(d.playerId||''),damage=Number(d.damage),victim=room.players.get(playerId);if(!victim||playerId===socket.id||victim.downed||!Number.isFinite(damage)||damage<=0||damage>1e7)return;const target=io.sockets.sockets.get(playerId);if(target)target.emit('player:mobDamage',{roomId:room.id,playerId,damage:Math.min(1e7,damage)});});
  socket.on('room:kick',(pid,cb=()=>{})=>{const room=rooms.get(socket.roomId);if(!room)return cb({ok:false,error:'Sala não encontrada.'});if(room.host!==socket.id)return cb({ok:false,error:'Somente o host pode expulsar.'});if(pid===room.host)return cb({ok:false,error:'Não pode expulsar o host.'});if(!room.players.has(pid))return cb({ok:false,error:'Jogador não encontrado.'});const target=io.sockets.sockets.get(pid);if(target)target.emit('room:kicked');removePlayer(room,pid);cb({ok:true});});
  socket.on('room:leave',(cb=()=>{})=>{const room=rooms.get(socket.roomId);if(room)removePlayer(room,socket.id);cb({ok:true});});
